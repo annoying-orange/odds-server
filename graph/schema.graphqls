@@ -1,0 +1,188 @@
+# GraphQL schema example
+#
+# https://gqlgen.com/getting-started/
+
+scalar Map
+
+enum Status {
+  UNSCHEDULED
+  SCHEDULED
+  STABLE
+  IN_PROGRESS
+  PAUSE
+  COMPLETE
+  REFUND
+  END
+}
+
+enum Period {
+  EARLY
+  TODAY
+  FIRST_HALF
+  HT
+  SECOND_HALF
+  FT
+}
+
+type Sport {
+  id: ID!
+  name: String!
+}
+
+type League {
+  id: ID!
+  name: String!
+  displayOrder: Int!
+  matches: [Match!]!
+}
+
+type Team {
+  id: ID!
+  name: String!
+}
+
+type Match {
+  id: ID!
+  matchTime: Int!
+  sportId: Int!
+  leagueId: ID!
+  status: Status!
+  livePeriod: Int!
+  liveTimer: Int!
+  homeId: Int!
+  homeName: String!
+  homeScore: Int!
+  homeRedcard: Int!
+  awayId: Int!
+  awayName: String!
+  awayScore: Int!
+  awayRedcard: Int!
+  more: Int!
+  displayOrder: Int!
+  markets: [Market!]!
+}
+
+interface Market {
+  id: ID!
+  matchId: ID!
+  status: Status!
+  displayOrder: Int!
+  betTypeId: Int!
+}
+
+type Hdpou implements Market {
+  id: ID!
+  matchId: ID!
+  status: Status!
+  displayOrder: Int!
+  betTypeId: Int!
+  handicap: Float!
+  hdp1: String!
+  hdp2: String!
+  o1: Float!
+  o2: Float!
+  i1: Float!
+  i2: Float!
+}
+
+type MO implements Market {
+  id: ID!
+  matchId: ID!
+  status: Status!
+  displayOrder: Int!
+  betTypeId: Int!
+  o1: Float!
+  o2: Float!
+  ox: Float!
+  i1: Float!
+  i2: Float!
+  ix: Float!
+}
+
+type CS implements Market {
+  id: ID!
+  matchId: ID!
+  status: Status!
+  displayOrder: Int!
+  betTypeId: Int!
+  o10: Float
+  o20: Float
+  o21: Float
+  o30: Float
+  o31: Float
+  o32: Float
+  o40: Float
+  o41: Float
+  o42: Float
+  o43: Float
+  o00: Float
+  o11: Float
+  o22: Float
+  o33: Float
+  o44: Float
+  o99: Float
+  o01: Float
+  o02: Float
+  o12: Float
+  o03: Float
+  o13: Float
+  o23: Float
+  o04: Float
+  o14: Float
+  o24: Float
+  o34: Float
+  i10: Int
+  i20: Int
+  i21: Int
+  i30: Int
+  i31: Int
+  i32: Int
+  i40: Int
+  i41: Int
+  i42: Int
+  i43: Int
+  i00: Int
+  i11: Int
+  i22: Int
+  i33: Int
+  i44: Int
+  i99: Int
+  i01: Int
+  i02: Int
+  i12: Int
+  i03: Int
+  i13: Int
+  i23: Int
+  i04: Int
+  i14: Int
+  i24: Int
+  i34: Int
+}
+
+type OE implements Market {
+  id: ID!
+  matchId: ID!
+  status: Status!
+  displayOrder: Int!
+  betTypeId: Int!
+  o1: Float!
+  o2: Float!
+  i1: Float!
+  i2: Float!
+}
+
+type Query {
+  leagues(date: String!): [League!]!
+  matches(date: String!): [MatchResult!]!
+}
+
+type Mutation {
+  increaseMarket(id: ID!, increases: Map!): Map!
+  updateMatch(id: ID!, fields: Map!): Map!
+}
+
+type Subscription {
+    subscribe(channels: [ID!]!): Map!
+}
+
+union MatchResult = League | Match | Hdpou | MO | CS | OE

@@ -1,0 +1,13 @@
+{
+    "AWSEBDockerrunVersion": "1",
+    "Logging": "/tmp/app",
+    "Image": {
+        "Name": "989041579659.dkr.ecr.ap-northeast-1.amazonaws.com/wesport/odds-server:latest",
+        "Update": "true"
+    },
+    "Ports": [
+        {
+            "ContainerPort": "80"
+        }
+    ]
+}
