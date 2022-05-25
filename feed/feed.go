@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/kafka"
@@ -17,10 +18,11 @@ import (
 
 // Feed ...
 type Feed struct {
-	RedisAddr string
 	ctx       context.Context
+	rdb       *redis.Client
 	in        *kafka.Consumer
 	out       *kafka.Producer
+	kafkaConf *kafka.ConfigMap
 }
 
 type betType struct {
@@ -83,8 +85,8 @@ var (
 		"hdp2":       "hdp2",
 		"oddsstatus": "status",
 		"sort":       "displayOrder",
-		"odds1a":     "o1",
-		"odds2a":     "o2",
+		"odds1a":     "oh",
+		"odds2a":     "oa",
 		"com1":       "o1",
 		"com2":       "o2",
 		"comx":       "ox",
@@ -119,8 +121,8 @@ var (
 	allStatus = map[string]model.Status{
 		"running":    model.StatusStable,
 		"suspend":    model.StatusPause,
+		"closePrice": model.StatusPause,
 		"closed":     model.StatusComplete,
-		"closePrice": model.StatusComplete,
 	}
 
 	betTypes = map[int]*betType{
@@ -210,44 +212,25 @@ var (
 			TypeName: "FGLG",
 		},
 	}
+
+	topics = []string{
+		"saba-soccer-hdpou",
+		"saba-soccer-1x2",
+		"saba-soccer-cs",
+		"saba-soccer-oe",
+		"saba-soccer-tg",
+		"saba-soccer-htft",
+		"saba-soccer-htftoe",
+		"saba-soccer-fglg",
+	}
+
+	pubs = make(chan *kafka.Message, 1024)
 )
 
 // NewFeed ...
-func NewFeed(redisAddr string) *Feed {
-	return &Feed{
-		RedisAddr: redisAddr,
-		ctx:       context.Background(),
-	}
-}
-
-// StartNewFeed create new feed and start it ...
-func StartNewFeed(redisAddr string) {
-	NewFeed(redisAddr).Start()
-}
-
-// Start feed
-// consume from kafka and save to Redis
-func (f *Feed) Start() {
-	ctx := f.ctx
-
-	// flag.String("redis", "localhost:6379", "Redis hostname")
-
-	// pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
-	// pflag.Parse()
-	// viper.BindPFlags(pflag.CommandLine)
-
-	// host := viper.GetString("redis")
-
-	// rdb := redis.NewFailoverClient(&redis.FailoverOptions{
-	// 	MasterName:    "master",
-	// 	SentinelAddrs: []string{"localhost:26379", "localhost:26380", "localhost:26381"},
-	// })
-
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "P@ssw0rd!", // no password set
-		DB:       1,           // use default DB
-	})
+func NewFeed(redisOpt *redis.FailoverOptions) *Feed {
+	ctx := context.Background()
+	rdb := redis.NewFailoverClient(redisOpt)
 
 	ping := rdb.Ping(ctx)
 	if ping.Err() != nil {
@@ -256,34 +239,34 @@ func (f *Feed) Start() {
 
 	fmt.Printf("Redis connected!\n")
 
-	// Read configs from redis
-	configs := rdb.HGetAll(ctx, "configs:odds.server")
-	if configs.Err() != nil {
-		fmt.Printf("Fetch configs error: %v\n", configs.Err())
+	bootstrapServers := os.Getenv("KAFKA_BOOTSTRAP_SERVERS")
+	if bootstrapServers == "" {
+		bootstrapServers = "localhost:9092"
 	}
 
-	kafakConf := &kafka.ConfigMap{
-		"bootstrap.servers": "localhost:9092",
+	kafkaConf := &kafka.ConfigMap{
+		"bootstrap.servers": bootstrapServers,
 		"group.id":          "wesport-feeds",
 		"auto.offset.reset": "earliest",
 	}
 
-	fmt.Printf("Kafka configs: %v\n", kafakConf)
+	fmt.Printf("Kafka configs: %v\n", kafkaConf)
 
-	consumer, err := kafka.NewConsumer(kafakConf)
-	if err != nil {
-		panic(err)
+	return &Feed{
+		ctx:       ctx,
+		rdb:       rdb,
+		kafkaConf: kafkaConf,
 	}
+}
 
-	run := true
-	err = consumer.SubscribeTopics([]string{"saba-soccer-hdpou"}, nil)
-	if err != nil {
-		print(err)
-		run = false
-	}
+// StartNewFeed create new feed and start it ...
+func StartNewFeed(redisOpt *redis.FailoverOptions) {
+	NewFeed(redisOpt).Start()
+}
 
-	pubs := make(chan *kafka.Message, 1024)
-
+// Start feed
+// consume from kafka and save to Redis
+func (f *Feed) Start() {
 	// Feed output to kafka
 	go func(ctx context.Context, conf *kafka.ConfigMap) {
 		p, err := kafka.NewProducer(conf)
@@ -313,378 +296,70 @@ func (f *Feed) Start() {
 
 		p.Flush(15 * 1000)
 		fmt.Println("The channel Pubs closed.")
-	}(ctx, kafakConf)
+	}(f.ctx, f.kafkaConf)
 
-	for run == true {
-		ev := consumer.Poll(100)
-		switch e := ev.(type) {
-		case *kafka.Message:
-			// fmt.Printf("Message on %s: %s\n", e.TopicPartition, string(e.Value))
-			var objmap map[string]interface{}
-			err := json.Unmarshal(e.Value, &objmap)
+	wg := new(sync.WaitGroup)
+	wg.Add(len(topics))
+
+	// Consume all topics
+	for _, topic := range topics {
+		go func(topic string, conf *kafka.ConfigMap) {
+			log.Printf("Consume topic: %s\n", topic)
+			defer wg.Done()
+
+			consumer, err := kafka.NewConsumer(conf)
 			if err != nil {
-				log.Fatal(err)
+				panic(err)
 			}
 
-			switch objmap["type"].(type) {
-			case string:
-				switch objmap["type"].(string) {
-				case "l":
-					id := strconv.FormatFloat(objmap["leagueid"].(float64), 'f', -1, 64)
-					key := fmt.Sprintf("league:%s", id)
-					values := make(map[string]interface{})
-					values["id"] = id
+			run := true
+			err = consumer.SubscribeTopics([]string{topic}, nil)
+			if err != nil {
+				print(err)
+				run = false
+			}
 
-					for k, v := range leaugeFields {
-						if o, ok := objmap[k]; ok {
-							values[v] = o
-						}
+			for run == true {
+				ev := consumer.Poll(100)
+				switch e := ev.(type) {
+				case *kafka.Message:
+					log.Printf("Message on %s: %s\n", e.TopicPartition, string(e.Value))
+					var msg map[string]interface{}
+					err := json.Unmarshal(e.Value, &msg)
+					if err != nil {
+						log.Fatal(err)
 					}
 
-					if len(values) > 1 {
-						rdb.HSet(ctx, key, values)
-					}
-				case "m":
-					if matchID, ok := objmap["matchid"]; ok == true {
-						id := strconv.FormatFloat(matchID.(float64), 'f', -1, 64)
-						key := fmt.Sprintf("match:%s", id)
-						values := make(map[string]interface{})
-						values["id"] = id
-						values["__typename"] = "Match"
-
-						if showTime, ok := objmap["globalshowtime"]; ok == true {
-							var mt int64
-							switch showTime.(type) {
-							case string:
-								mt, _ = strconv.ParseInt(showTime.(string), 10, 64)
-							case float64:
-								mt = int64(showTime.(float64))
-							}
-
-							d := time.Unix(mt, 0).UTC().Add(time.Hour * -4)
-							date := fmt.Sprintf("sport:%v:%v", objmap["sporttype"], d.Format("20060102"))
-							rdb.ZAdd(ctx, date, &redis.Z{
-								Score:  float64(mt),
-								Member: strconv.FormatFloat(matchID.(float64), 'f', -1, 64),
-							})
-
-							// Set channel
-							if channel, err := f.getChannel(strconv.FormatInt(mt, 10)); err == nil {
-								values["channel"] = channel
-							}
-						}
-
-						// Home Team
-						if homeID, ok := objmap["homeid"]; ok {
-							teamID := strconv.FormatFloat(homeID.(float64), 'f', -1, 64)
-							team := make(map[string]interface{})
-							team["id"] = teamID
-
-							if sportID, ok := objmap["sporttype"]; ok {
-								team["sportId"] = sportID
-							}
-
-							if name, ok := objmap["hteamnamech"]; ok {
-								team["zh_CHT"] = name
-							}
-
-							if name, ok := objmap["hteamnamecn"]; ok {
-								team["zh_CHS"] = name
-							}
-
-							if name, ok := objmap["hteamnameen"]; ok {
-								team["en_US"] = name
-							}
-
-							if name, ok := objmap["hteamnameth"]; ok {
-								team["th"] = name
-							}
-
-							if name, ok := objmap["hteamnamevn"]; ok {
-								team["vn"] = name
-							}
-
-							rdb.HSet(ctx, fmt.Sprintf("team:%s", teamID), team)
-						}
-
-						// Away Team
-						if awayID, ok := objmap["awayid"]; ok {
-							teamID := strconv.FormatFloat(awayID.(float64), 'f', -1, 64)
-							team := make(map[string]interface{})
-							team["id"] = teamID
-
-							if sportID, ok := objmap["sporttype"]; ok {
-								team["sportId"] = sportID
-							}
-
-							if name, ok := objmap["ateamnamech"]; ok {
-								team["zh_CHT"] = name
-							}
-
-							if name, ok := objmap["ateamnamecn"]; ok {
-								team["zh_CHS"] = name
-							}
-
-							if name, ok := objmap["ateamnameen"]; ok {
-								team["en_US"] = name
-							}
-
-							if name, ok := objmap["ateamnameth"]; ok {
-								team["th"] = name
-							}
-
-							if name, ok := objmap["ateamnamevn"]; ok {
-								team["vn"] = name
-							}
-
-							rdb.HSet(ctx, fmt.Sprintf("team:%s", teamID), team)
-						}
-
-						for k, v := range matchFields {
-							if o, ok := objmap[k]; ok {
-								switch k {
-								case "eventstatus":
-									values[v] = string(f.getStatus(o.(string), objmap["marketid"], objmap["l"]))
-								case "isht":
-									if ht, ok := objmap["isht"]; ok && ht.(bool) {
-										// HT
-										values[v] = 3
-									}
-								case "liveperiod":
-									// Ignore liveperiod when HT
-									if ht, ok := objmap["isht"]; !ok || !ht.(bool) {
-										values[v] = o
-									}
-								default:
-									values[v] = o
-								}
-							}
-						}
-
-						if len(values) > 2 {
-							// Set Match
-							if h := rdb.HSet(ctx, key, values); h.Err() != nil {
-								fmt.Printf("HSet %v %v: %v\n", key, values, h.Err())
-							}
-
-							// Public
-							var channel interface{}
-							h := rdb.HMGet(ctx, key, "channel", "leagueId")
-							if h.Err() == nil {
-								val := h.Val()
-								channel = val[0]
-								values["leagueId"] = val[1]
-							}
-
-							if channel != nil {
-								// Public League
-								if leagueID, ok := objmap["leagueid"]; ok {
-									leagueKey := fmt.Sprintf("league:%s", strconv.FormatFloat(leagueID.(float64), 'f', -1, 64))
-									if h := rdb.HGetAll(ctx, leagueKey); h.Err() == nil {
-										val := h.Val()
-										f.send(pubs, map[string]interface{}{
-											"id":           val["id"],
-											"name":         val["en_US"],
-											"sportId":      val["sportId"],
-											"displayOrder": val["displayOrder"],
-											"__typename":   "League",
-										})
-									} else {
-										fmt.Printf("HGETALL %v: %v", leagueKey, h.Err())
-									}
-								}
-
-								f.send(pubs, values)
-							}
+					switch msg["type"].(type) {
+					case string:
+						switch msg["type"].(string) {
+						case "l":
+							f.setLeague(msg)
+						case "m":
+							f.setMatch(msg)
+						case "o":
+							f.setOdds(msg)
+						case "dm":
+							f.closeMatch(msg)
+						case "do":
+							f.closeOdds(msg)
 						}
 					}
-				case "o":
-					if oddsID, ok := objmap["oddsid"]; ok {
-						var id string
-						switch oddsID.(type) {
-						case string:
-							id = oddsID.(string)
-						case float64:
-							id = strconv.FormatFloat(oddsID.(float64), 'f', -1, 64)
-						}
-						key := fmt.Sprintf("odds:%s", id)
-						values := make(map[string]interface{})
-						values["id"] = id
-
-						if val, ok := objmap["matchid"]; ok == true {
-							mid := strconv.FormatFloat(val.(float64), 'f', -1, 64)
-
-							rdb.ZAdd(ctx, fmt.Sprintf("match:%v:odds", mid), &redis.Z{
-								Score:  objmap["sort"].(float64),
-								Member: id,
-							})
-
-							// Set channel
-							h := rdb.HMGet(ctx, fmt.Sprintf("match:%v", mid), "matchTime", "leagueId")
-							if h.Err() == nil {
-								val := h.Val()
-								if val[0] != nil && val[1] != nil {
-									if channel, err := f.getChannel(val[0].(string)); err == nil {
-										values["channel"] = channel
-									}
-									values["leagueId"] = val[1].(string)
-								}
-							}
-						}
-
-						for k, v := range oddsFields {
-							switch k {
-							case "bettype":
-								if bettype, ok := objmap[k]; ok {
-									if bt, ok := betTypes[int(bettype.(float64))]; ok {
-										values["betTypeId"] = bt.ID
-										values["betTypeName"] = bt.Name
-										values["__typename"] = bt.TypeName
-									}
-								}
-							case "oddsstatus":
-								if oddsstatus, ok := objmap["oddsstatus"]; ok {
-									if status, ok := allStatus[oddsstatus.(string)]; ok {
-										values[v] = string(status)
-									}
-								}
-							default:
-								if o, ok := objmap[k]; ok {
-									values[v] = o
-								}
-							}
-						}
-
-						// Make handicap
-						hdp1, hdp1OK := values["hdp1"]
-						hdp2, hdp2OK := values["hdp2"]
-
-						if hdp1OK || hdp2OK {
-							var btID int
-							var handicap float64
-							if val, ok := values["betTypeId"]; ok {
-								btID = val.(int)
-							} else if h := rdb.HGet(ctx, key, "betTypeId"); h.Err() == nil {
-								btID, _ = strconv.Atoi(h.Val())
-							}
-
-							if hdp1OK {
-								handicap = hdp1.(float64)
-							}
-
-							if hdp2OK {
-								handicap -= hdp2.(float64)
-							}
-
-							values["handicap"] = handicap
-
-							if btID == 11003 || btID == 11004 {
-								// Over/Under
-								values["hdp1"] = fmt.Sprintf("%v", handicap)
-								values["hdp2"] = "u"
-							} else if btID == 11001 || btID == 11002 {
-								// Handicap
-								if handicap >= 0 {
-									values["hdp1"] = f.displayHandicap(handicap)
-									values["hdp2"] = ""
-								} else {
-									values["hdp1"] = ""
-									values["hdp2"] = f.displayHandicap(handicap)
-								}
-							}
-						}
-
-						if len(values) > 1 {
-							// Set Odds
-							if h := rdb.HSet(ctx, key, values); h.Err() != nil {
-								fmt.Printf("HSet %v %v: %v\n", key, values, h.Err())
-							}
-
-							// Public to match channel
-							h := rdb.HMGet(ctx, key, "__typename", "channel", "matchId", "leagueId")
-							if h.Err() == nil {
-								val := h.Val()
-								if val[1] != nil {
-									values["__typename"] = val[0]
-									values["matchId"] = val[2]
-									values["leagueId"] = val[3]
-
-									f.send(pubs, values)
-								}
-							}
-						}
-					}
-				case "dm":
-					if matchID, ok := objmap["matchid"]; ok {
-						id := strconv.FormatFloat(matchID.(float64), 'f', -1, 64)
-						key := fmt.Sprintf("match:%s", id)
-
-						if h := rdb.HMGet(ctx, key, "__typename", "id", "leagueId", "channel"); h.Err() == nil {
-							val := h.Val()
-							values := map[string]interface{}{
-								"status": string(model.StatusComplete),
-							}
-
-							if r := rdb.HSet(ctx, key, values); r.Err() != nil {
-								fmt.Printf("HSet %v %v: %v", key, values, r.Err())
-							}
-
-							if val[3] != nil {
-								values["__typename"] = val[0]
-								values["id"] = val[1]
-								values["leagueId"] = val[2]
-
-								f.send(pubs, values)
-							}
-						} else {
-							fmt.Printf("HMGet %v: %v", key, h.Err())
-						}
-					}
-				case "do":
-					if oddsID, ok := objmap["oddsid"]; ok {
-						var id string
-						switch oddsID.(type) {
-						case string:
-							id = oddsID.(string)
-						case float64:
-							id = strconv.FormatFloat(oddsID.(float64), 'f', -1, 64)
-						}
-						key := fmt.Sprintf("odds:%s", id)
-
-						if h := rdb.HMGet(ctx, key, "__typename", "id", "matchId", "leagueId", "channel"); h.Err() == nil {
-							val := h.Val()
-							values := map[string]interface{}{
-								"status": string(model.StatusComplete),
-							}
-
-							if do := rdb.HSet(ctx, key, values); do.Err() != nil {
-								fmt.Printf("HSet %v %v: %v", key, values, do.Err())
-							}
-
-							if val[4] != nil {
-								values["__typename"] = val[0]
-								values["id"] = val[1]
-								values["matchId"] = val[2]
-								values["leagueId"] = val[3]
-
-								f.send(pubs, values)
-							}
-						} else {
-							fmt.Printf("HMGet %v: %v", key, h.Err())
-						}
-					}
+				case kafka.PartitionEOF:
+					log.Printf("%% Reached %v\n", e)
+				case kafka.Error:
+					log.Fprintf(os.Stderr, "Error: %v\n", e)
+					run = false
 				}
 			}
-		case kafka.PartitionEOF:
-			fmt.Printf("%% Reached %v\n", e)
-		case kafka.Error:
-			fmt.Fprintf(os.Stderr, "Error: %v\n", e)
-			run = false
-		}
+
+			consumer.Close()
+			log.Printf("Consume topic %s done.\n", topic)
+		}(topic, f.kafkaConf)
 	}
 
+	wg.Wait()
 	close(pubs)
-	consumer.Close()
 }
 
 func (f *Feed) getStatus(status string, marketID, l interface{}) model.Status {
@@ -713,6 +388,24 @@ func (f *Feed) getChannel(mt string) (string, error) {
 	return fmt.Sprintf("%v", d.Format("20060102")), nil
 }
 
+func (f *Feed) getTitle(mt string) (string, error) {
+	t, err := strconv.ParseInt(mt, 10, 64)
+	if err != nil {
+		return "", err
+	}
+
+	now := time.Now().UTC().Add(time.Hour * -4)
+	time := time.Unix(t, 0).UTC().Add(time.Hour * -4)
+
+	if now.After(time) {
+		return "live", nil
+	} else if now.Format("20060102") == time.Format("20060102") {
+		return "today", nil
+	} else {
+		return "early", nil
+	}
+}
+
 func (f *Feed) displayHandicap(hdp float64) string {
 	val := math.Abs(hdp)
 	if math.Mod(val, 0.5) == 0 {
@@ -721,13 +414,381 @@ func (f *Feed) displayHandicap(hdp float64) string {
 	return fmt.Sprintf("%v-%v", val-0.25, val+0.25)
 }
 
-func (f *Feed) send(pubs chan<- *kafka.Message, msg interface{}) {
+func (f *Feed) send(typeName string, msg interface{}) {
 	if bv, err := json.Marshal(msg); err == nil {
 		topic := "wesport-feeds"
 
 		pubs <- &kafka.Message{
 			TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
 			Value:          bv,
+		}
+	}
+}
+
+func (f *Feed) setLeague(msg map[string]interface{}) {
+	id := strconv.FormatFloat(msg["leagueid"].(float64), 'f', -1, 64)
+	key := fmt.Sprintf("league:%s", id)
+	value := make(map[string]interface{})
+	value["id"] = id
+
+	for k, v := range leaugeFields {
+		if o, ok := msg[k]; ok {
+			value[v] = o
+		}
+	}
+
+	if len(value) > 1 {
+		f.rdb.HSet(f.ctx, key, value)
+
+		// Public league
+		if h := f.rdb.HGetAll(f.ctx, key); h.Err() == nil {
+			val := h.Val()
+			typeName := "League"
+			f.send(typeName, map[string]interface{}{
+				"id": val["id"],
+				"name": map[string]interface{}{
+					"en_US":  val["en_US"],
+					"zh_CHS": val["zh_CHS"],
+					"zh_CHT": val["zh_CHT"],
+					"th":     val["th"],
+					"vn":     val["vn"],
+				},
+				"sportId":      val["sportId"],
+				"displayOrder": val["displayOrder"],
+				"__typename":   typeName,
+			})
+		}
+	}
+}
+
+func (f *Feed) setMatch(msg map[string]interface{}) {
+	if matchID, ok := msg["matchid"]; ok {
+		id := strconv.FormatFloat(matchID.(float64), 'f', -1, 64)
+		typeName := "Match"
+
+		key := fmt.Sprintf("match:%s", id)
+		value := make(map[string]interface{})
+		value["id"] = id
+		value["__typename"] = typeName
+
+		if showTime, ok := msg["globalshowtime"]; ok == true {
+			var mt int64
+			switch showTime.(type) {
+			case string:
+				mt, _ = strconv.ParseInt(showTime.(string), 10, 64)
+			case float64:
+				mt = int64(showTime.(float64))
+			}
+
+			if sportType, ok := msg["sporttype"]; ok {
+				d := time.Unix(mt, 0).UTC().Add(time.Hour * -4)
+				date := fmt.Sprintf("sport:%v:%v", sportType, d.Format("20060102"))
+				f.rdb.ZAdd(f.ctx, date, &redis.Z{
+					Score:  float64(mt),
+					Member: strconv.FormatFloat(matchID.(float64), 'f', -1, 64),
+				})
+			}
+		}
+
+		// Home team
+		if homeID, ok := msg["homeid"]; ok {
+			teamID := strconv.FormatFloat(homeID.(float64), 'f', -1, 64)
+			team := make(map[string]interface{})
+			team["id"] = teamID
+
+			if sportID, ok := msg["sporttype"]; ok {
+				team["sportId"] = sportID
+			}
+
+			if name, ok := msg["hteamnamech"]; ok {
+				team["zh_CHT"] = name
+			}
+
+			if name, ok := msg["hteamnamecn"]; ok {
+				team["zh_CHS"] = name
+			}
+
+			if name, ok := msg["hteamnameen"]; ok {
+				team["en_US"] = name
+			}
+
+			if name, ok := msg["hteamnameth"]; ok {
+				team["th"] = name
+			}
+
+			if name, ok := msg["hteamnamevn"]; ok {
+				team["vn"] = name
+			}
+
+			f.rdb.HSet(f.ctx, fmt.Sprintf("team:%s", teamID), team)
+		}
+
+		// Away team
+		if awayID, ok := msg["awayid"]; ok {
+			teamID := strconv.FormatFloat(awayID.(float64), 'f', -1, 64)
+			team := make(map[string]interface{})
+			team["id"] = teamID
+
+			if sportID, ok := msg["sporttype"]; ok {
+				team["sportId"] = sportID
+			}
+
+			if name, ok := msg["ateamnamech"]; ok {
+				team["zh_CHT"] = name
+			}
+
+			if name, ok := msg["ateamnamecn"]; ok {
+				team["zh_CHS"] = name
+			}
+
+			if name, ok := msg["ateamnameen"]; ok {
+				team["en_US"] = name
+			}
+
+			if name, ok := msg["ateamnameth"]; ok {
+				team["th"] = name
+			}
+
+			if name, ok := msg["ateamnamevn"]; ok {
+				team["vn"] = name
+			}
+
+			f.rdb.HSet(f.ctx, fmt.Sprintf("team:%s", teamID), team)
+		}
+
+		for k, v := range matchFields {
+			if o, ok := msg[k]; ok {
+				switch k {
+				case "eventstatus":
+					value[v] = string(f.getStatus(o.(string), msg["marketid"], msg["l"]))
+				case "isht":
+					if ht, ok := msg["isht"]; ok && ht.(bool) {
+						// HT
+						value[v] = 3
+					}
+				case "liveperiod":
+					// Ignore liveperiod when HT
+					if ht, ok := msg["isht"]; !ok || !ht.(bool) {
+						value[v] = o
+					}
+				default:
+					value[v] = o
+				}
+			}
+		}
+
+		if len(value) > 2 {
+			// Set Match
+			if h := f.rdb.HSet(f.ctx, key, value); h.Err() != nil {
+				fmt.Printf("HSet %v %v: %v\n", key, value, h.Err())
+			}
+
+			// Get league ID
+			if h := f.rdb.HMGet(f.ctx, key, "leagueId"); h.Err() == nil {
+				val := h.Val()
+				value["leagueId"] = val[0]
+			}
+
+			f.send(typeName, value)
+		}
+	}
+}
+
+func (f *Feed) setOdds(msg map[string]interface{}) {
+	if oddsID, ok := msg["oddsid"]; ok {
+		var id string
+		switch oddsID.(type) {
+		case string:
+			id = oddsID.(string)
+		case float64:
+			id = strconv.FormatFloat(oddsID.(float64), 'f', -1, 64)
+		}
+
+		key := fmt.Sprintf("odds:%s", id)
+		value := make(map[string]interface{})
+		value["id"] = id
+
+		for k, v := range oddsFields {
+			switch k {
+			case "bettype":
+				if bettype, ok := msg[k]; ok {
+					if bt, ok := betTypes[int(bettype.(float64))]; ok {
+						value["betTypeId"] = bt.ID
+						value["betTypeName"] = bt.Name
+						value["__typename"] = bt.TypeName
+					}
+				}
+			case "oddsstatus":
+				if oddsstatus, ok := msg["oddsstatus"]; ok {
+					if status, ok := allStatus[oddsstatus.(string)]; ok {
+						value[v] = string(status)
+					}
+				}
+			default:
+				if o, ok := msg[k]; ok {
+					value[v] = o
+				}
+			}
+		}
+
+		// Make handicap
+		hdp1, hdp1OK := value["hdp1"]
+		hdp2, hdp2OK := value["hdp2"]
+
+		if hdp1OK || hdp2OK {
+			var btID int
+			var handicap float64
+			if val, ok := value["betTypeId"]; ok {
+				btID = val.(int)
+			} else if h := f.rdb.HGet(f.ctx, key, "betTypeId"); h.Err() == nil {
+				btID, _ = strconv.Atoi(h.Val())
+			}
+
+			if hdp1OK {
+				handicap = hdp1.(float64)
+			}
+
+			if hdp2OK {
+				handicap -= hdp2.(float64)
+			}
+
+			value["handicap"] = handicap
+
+			if btID == 11003 || btID == 11004 {
+				// Over/Under
+				value["hdp1"] = fmt.Sprintf("%v", handicap)
+				value["hdp2"] = "u"
+			} else if btID == 11001 || btID == 11002 {
+				// Handicap
+				if handicap >= 0 {
+					value["hdp1"] = f.displayHandicap(handicap)
+					value["hdp2"] = ""
+				} else {
+					value["hdp1"] = ""
+					value["hdp2"] = f.displayHandicap(handicap)
+				}
+			}
+		}
+
+		if val, ok := msg["matchid"]; ok {
+			matchID := strconv.FormatFloat(val.(float64), 'f', -1, 64)
+
+			f.rdb.ZAdd(f.ctx, fmt.Sprintf("match:%v:odds", matchID), &redis.Z{
+				Score:  msg["sort"].(float64),
+				Member: id,
+			})
+
+			if typeID, ok := value["betTypeId"]; ok {
+				f.rdb.ZAdd(f.ctx, fmt.Sprintf("match:%v:%v", matchID, typeID), &redis.Z{
+					Score:  msg["sort"].(float64),
+					Member: id,
+				})
+			}
+
+			// if cmd := f.rdb.ZAdd(f.ctx, fmt.Sprintf("match:%v:odds", matchID), &redis.Z{
+			// 	Score:  msg["sort"].(float64),
+			// 	Member: id,
+			// }); cmd.Val() > 0 {
+			// 	if typeID, ok := value["betTypeId"]; ok {
+			// 		f.rdb.ZIncrBy(f.ctx, fmt.Sprintf("match:%v:bettypes", matchID), 1, strconv.Itoa((typeID.(int))))
+			// 	}
+			// }
+
+			// Set league ID
+			if h := f.rdb.HMGet(f.ctx, fmt.Sprintf("match:%v", matchID), "matchTime", "leagueId"); h.Err() == nil {
+				val := h.Val()
+				if val[0] != nil && val[1] != nil {
+					value["leagueId"] = val[1].(string)
+				}
+			}
+		}
+
+		if len(value) > 1 {
+			// Set Odds
+			if h := f.rdb.HSet(f.ctx, key, value); h.Err() != nil {
+				fmt.Printf("HSet %v %v: %v\n", key, value, h.Err())
+			}
+
+			// Public to match channel
+			h := f.rdb.HMGet(f.ctx, key, "__typename", "matchId", "leagueId")
+			if h.Err() == nil {
+				val := h.Val()
+				typeName := val[0].(string)
+
+				value["__typename"] = val[0]
+				value["matchId"] = val[1]
+				value["leagueId"] = val[2]
+
+				f.send(typeName, value)
+			}
+		}
+	}
+}
+
+func (f *Feed) closeMatch(msg map[string]interface{}) {
+	if matchID, ok := msg["matchid"]; ok {
+		id := strconv.FormatFloat(matchID.(float64), 'f', -1, 64)
+		key := fmt.Sprintf("match:%s", id)
+
+		if h := f.rdb.HMGet(f.ctx, key, "__typename", "id", "leagueId"); h.Err() == nil {
+			val := h.Val()
+			if val[1] != nil {
+				value := map[string]interface{}{
+					"status": string(model.StatusComplete),
+				}
+
+				if h := f.rdb.HSet(f.ctx, key, value); h.Err() != nil {
+					fmt.Printf("HSet %v %v: %v", key, value, h.Err())
+				}
+
+				value["__typename"] = val[0]
+				value["id"] = val[1]
+				value["leagueId"] = val[2]
+
+				f.send(val[0].(string), value)
+			}
+		} else {
+			log.Printf("HMGet %v: %v", key, h.Err())
+		}
+	}
+}
+
+func (f *Feed) closeOdds(msg map[string]interface{}) {
+	if oddsID, ok := msg["oddsid"]; ok {
+		var id string
+		switch oddsID.(type) {
+		case string:
+			id = oddsID.(string)
+		case float64:
+			id = strconv.FormatFloat(oddsID.(float64), 'f', -1, 64)
+		}
+
+		key := fmt.Sprintf("odds:%s", id)
+
+		if h := f.rdb.HMGet(f.ctx, key, "__typename", "id", "matchId", "leagueId", "betTypeId"); h.Err() == nil {
+			val := h.Val()
+			if val[1] != nil {
+				value := map[string]interface{}{
+					"status": string(model.StatusComplete),
+				}
+
+				if h := f.rdb.HSet(f.ctx, key, value); h.Err() != nil {
+					fmt.Printf("HSet %v %v: %v", key, value, h.Err())
+				}
+
+				if val[2] != nil && val[4] != nil {
+					f.rdb.ZRem(f.ctx, fmt.Sprintf("match:%v:%v", val[2], val[4]), val[1])
+				}
+
+				value["__typename"] = val[0]
+				value["id"] = val[1]
+				value["matchId"] = val[2]
+				value["leagueId"] = val[3]
+
+				f.send(val[0].(string), value)
+			}
+		} else {
+			log.Printf("HMGet %v: %v", key, h.Err())
 		}
 	}
 }

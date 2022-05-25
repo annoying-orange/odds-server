@@ -67,7 +67,6 @@ func Middleware() func(http.Handler) http.Handler {
 
 // ForContext finds the user from the context. REQUIRES Middleware to have run.
 func ForContext(ctx context.Context) *User {
-	fmt.Println(ctx.)
 	raw, _ := ctx.Value(UserCtxKey).(*User)
 	fmt.Println(raw)
 	return raw

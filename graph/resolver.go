@@ -54,15 +54,16 @@ func ForeverSleep(d time.Duration, f RetryFunc) {
 }
 
 // NewResolver ...
-func NewResolver(redisAddr string) (*Resolver, error) {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Password: "P@ssw0rd!", // no password set
-		DB:       1,           // use default DB
-	})
+func NewResolver(redisOpt *redis.FailoverOptions) (*Resolver, error) {
+	rdb := redis.NewFailoverClient(redisOpt)
+
+	bootstrapServers := os.Getenv("KAFKA_BOOTSTRAP_SERVERS")
+	if bootstrapServers == "" {
+		bootstrapServers = "localhost:9092"
+	}
 
 	kafakConf := &kafka.ConfigMap{
-		"bootstrap.servers": "localhost:9092",
+		"bootstrap.servers": bootstrapServers,
 		"group.id":          "wesport-subscribes",
 		"auto.offset.reset": "earliest",
 	}
