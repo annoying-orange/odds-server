@@ -182,7 +182,7 @@ type Mutation {
 }
 
 type Subscription {
-    subscribe(channels: [ID!]!): Map!
+  subscribe(condition: [String!]!): Map!
 }
 
 union MatchResult = League | Match | Hdpou | MO | CS | OE

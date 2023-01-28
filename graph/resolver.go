@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -29,6 +30,12 @@ import (
 //
 // It serves as dependency injection for your app, add any dependencies you require here.
 
+type MessageCondition struct {
+	SportID  int
+	MarketID int
+	Bettypes []string
+}
+
 // Resolver ...
 type Resolver struct {
 	redisClient   *redis.Client
@@ -36,6 +43,7 @@ type Resolver struct {
 	matchChannels map[string]chan *model.Match
 	subscribes    map[string]*redis.PubSub
 	msgChannels   map[int]chan map[string]interface{}
+	msgConditions map[int]MessageCondition
 	consumer      *kafka.Consumer
 }
 
@@ -81,8 +89,43 @@ func NewResolver(redisOpt *redis.FailoverOptions) (*Resolver, error) {
 		matchChannels: map[string]chan *model.Match{},
 		subscribes:    map[string]*redis.PubSub{},
 		msgChannels:   map[int]chan map[string]interface{}{},
+		msgConditions: map[int]MessageCondition{},
 		consumer:      consumer,
 	}, nil
+}
+
+func (c *MessageCondition) ContainsBettype(typeID string) bool {
+	for _, v := range c.Bettypes {
+		if v == typeID {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *MessageCondition) EqMarket(matchTime string) bool {
+	if val, err := strconv.ParseInt(matchTime, 10, 64); err == nil {
+		now := time.Now().UTC().Add(time.Hour * -4)
+		mt := time.Unix(val, 0).UTC().Add(time.Hour * -4)
+
+		// Live
+		if c.MarketID == 1 {
+			return now.After(mt)
+		}
+
+		// Today
+		if c.MarketID == 2 {
+			return now.After(mt) || now.Format("20060102") == mt.Format("20060102")
+		}
+
+		// Early
+		if c.MarketID == 3 {
+			return now.Format("20060102") > mt.Format("20060102")
+		}
+	}
+
+	return false
 }
 
 // Serve ...
@@ -91,29 +134,27 @@ func (r *Resolver) Serve(route string, port string) error {
 	srv.AddTransport(&transport.Websocket{
 		Upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
-				println("Websocket CheckOrigin")
 				return true
 			},
 		},
 		InitFunc: func(ctx context.Context, payload transport.InitPayload) (context.Context, error) {
-			// userId, err := validateAndGetUserID(payload["token"])
-			// if err != nil {
-			// 	return nil, err
-			// }
+			if token, ok := payload["Authorization"]; ok {
+				user, err := auth.ValidateAndGetUser(token.(string))
+				if err != nil {
+					log.Printf("Authorization failed: %v\n", err)
+					return nil, fmt.Errorf("Unauthorized")
+				}
 
-			fmt.Printf("payload: %v\n", payload)
+				log.Printf("Authorized user: %v\n", user.ID)
 
-			// // get the user from the database
-			// user := getUserByID(db, userId)
-			user := &auth.User{
-				ID: 2,
+				// put user in context
+				userCtx := context.WithValue(ctx, auth.UserCtxKey, user)
+
+				// and return it so the resolvers can see it
+				return userCtx, nil
 			}
 
-			// put it in context
-			userCtx := context.WithValue(ctx, auth.UserCtxKey, user)
-
-			// and return it so the resolvers can see it
-			return userCtx, nil
+			return ctx, nil
 		},
 		KeepAlivePingInterval: 10 * time.Second,
 	})
@@ -130,7 +171,7 @@ func (r *Resolver) Serve(route string, port string) error {
 	})
 
 	router := chi.NewRouter()
-	router.Use(auth.Middleware())
+	// router.Use(auth.Middleware())
 	router.Handle(route, srv)
 	router.Handle("/playground", playground.Handler("GraphQL playground", route))
 	router.Handle("/query", srv)
@@ -155,8 +196,26 @@ func (r *Resolver) Serve(route string, port string) error {
 					fmt.Println("error:", err)
 				} else {
 					r.mutex.Lock()
-					for _, v := range r.msgChannels {
-						v <- m
+					for userID, v := range r.msgChannels {
+						if condition, ok := r.msgConditions[userID]; ok {
+							typeName := m["__typename"]
+
+							if matchTime, ok := m["matchTime"]; ok && typeName == "Match" {
+								if condition.EqMarket(fmt.Sprintf("%v", matchTime)) {
+									v <- m
+								}
+								continue
+							}
+
+							if typeID, ok := m["betTypeId"]; ok {
+								if condition.ContainsBettype(fmt.Sprintf("%v", typeID)) {
+									v <- m
+								}
+								continue
+							}
+
+							v <- m
+						}
 					}
 					r.mutex.Unlock()
 				}

@@ -389,17 +389,24 @@ func (r *queryResolver) Matches(ctx context.Context, date string) ([]model.Match
 	return result, nil
 }
 
-func (r *subscriptionResolver) Subscribe(ctx context.Context, channels []string) (<-chan map[string]interface{}, error) {
+func (r *subscriptionResolver) Subscribe(ctx context.Context, condition []string) (<-chan map[string]interface{}, error) {
 	user := auth.ForContext(ctx)
-	log.Printf("Subscribe: %v, %v", user, channels)
+	sportID, _ := strconv.Atoi(condition[0])
+	marketID, _ := strconv.Atoi(condition[1])
+	bettypes := strings.Split(condition[2], ",")
 
 	// Create new channel for request
-	msgChannel := make(chan map[string]interface{}, 1)
+	ch := make(chan map[string]interface{}, 1)
 	r.mutex.Lock()
-	r.msgChannels[user.ID] = msgChannel
+	r.msgChannels[user.ID] = ch
+	r.msgConditions[user.ID] = MessageCondition{
+		SportID:  sportID,
+		MarketID: marketID,
+		Bettypes: bettypes,
+	}
 	r.mutex.Unlock()
 
-	log.Printf("%v: %v\n", user.ID, r.msgChannels[user.ID])
+	log.Printf("Connect: %v, %v (total: %v connections)\n", user.ID, r.msgConditions[user.ID], len(r.msgChannels))
 
 	// Delete channel when done
 	go func() {
@@ -409,11 +416,14 @@ func (r *subscriptionResolver) Subscribe(ctx context.Context, channels []string)
 			close(mc)
 			delete(r.msgChannels, user.ID)
 		}
+		if _, ok := r.msgConditions[user.ID]; ok {
+			delete(r.msgConditions, user.ID)
+		}
 		r.mutex.Unlock()
-		fmt.Printf("Done: %v\n", user.ID)
+		fmt.Printf("Disconnect: %v (total: %v connections)\n", user.ID, len(r.msgChannels))
 	}()
 
-	return msgChannel, nil
+	return ch, nil
 }
 
 // Mutation returns generated.MutationResolver implementation.
@@ -429,6 +439,12 @@ type mutationResolver struct{ *Resolver }
 type queryResolver struct{ *Resolver }
 type subscriptionResolver struct{ *Resolver }
 
+// !!! WARNING !!!
+// The code below was going to be deleted when updating resolvers. It has been copied here so you have
+// one last chance to move it out of harms way if you want. There are two reasons this happens:
+//  - When renaming or deleting a resolver the old code will be put in here. You can safely delete
+//    it when you're done.
+//  - You have helper methods in this file. Move them out to keep these resolver files clean.
 func displayHandicap(hdp float64) string {
 	val := math.Abs(hdp)
 	if math.Mod(val, 0.5) == 0 {
@@ -436,11 +452,9 @@ func displayHandicap(hdp float64) string {
 	}
 	return fmt.Sprintf("%v-%v", val-0.25, val+0.25)
 }
-
 func isClosed(status model.Status) bool {
 	return status == model.StatusComplete || status == model.StatusEnd || status == model.StatusRefund
 }
-
 func appendLeague(slice []model.League, leauge model.League) []model.League {
 	ok := true
 	for _, e := range slice {

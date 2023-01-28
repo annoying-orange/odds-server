@@ -35,20 +35,20 @@ func ParseToken(tokenStr string) (*User, error) {
 	})
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
 		user := &User{
-			ID:             claims["user_id"].(int),
-			Name:           claims["user_name"].(string),
-			LoginID:        "",
-			Status:         claims["user_status"].(int),
-			IsSub:          claims["subuser"].(bool),
-			Currency:       claims["currency"].(string),
-			Permission:     int64(claims["permission"].(float64)),
-			PasswordExpiry: claims["password_expiry"].(int64),
-			LastLogin:      claims["last_login"].(int64),
-			LastLoginFrom:  claims["last_login_from"].(string),
-			Type:           claims["user_type"].(int),
-			ParentID:       claims["user_parent_id"].(int64),
-			Profiles:       claims["profiles"].(map[string]interface{}),
-			Roles:          []string{claims["scope"].(string)},
+			ID:      claims["user_id"].(int),
+			Name:    claims["user_name"].(string),
+			LoginID: "",
+			Status:  claims["user_status"].(int),
+			// IsSub:          claims["subuser"].(bool),
+			Currency:   claims["currency"].(string),
+			Permission: int64(claims["permission"].(float64)),
+			// PasswordExpiry: claims["password_expiry"].(int64),
+			LastLogin:     claims["last_login"].(int64),
+			LastLoginFrom: claims["last_login_from"].(string),
+			Type:          claims["user_type"].(int),
+			// ParentID:       claims["user_parent_id"].(int64),
+			Profiles: claims["profiles"].(map[string]interface{}),
+			// Roles:          []string{claims["scope"].(string)},
 		}
 		return user, nil
 	} else {

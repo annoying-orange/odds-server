@@ -237,7 +237,7 @@ func NewFeed(redisOpt *redis.FailoverOptions) *Feed {
 		panic(ping.Err())
 	}
 
-	fmt.Printf("Redis connected!\n")
+	log.Printf("Redis connected!\n")
 
 	bootstrapServers := os.Getenv("KAFKA_BOOTSTRAP_SERVERS")
 	if bootstrapServers == "" {
@@ -247,10 +247,9 @@ func NewFeed(redisOpt *redis.FailoverOptions) *Feed {
 	kafkaConf := &kafka.ConfigMap{
 		"bootstrap.servers": bootstrapServers,
 		"group.id":          "wesport-feeds",
-		"auto.offset.reset": "earliest",
 	}
 
-	fmt.Printf("Kafka configs: %v\n", kafkaConf)
+	log.Printf("Kafka configs: %v\n", kafkaConf)
 
 	return &Feed{
 		ctx:       ctx,
@@ -323,7 +322,7 @@ func (f *Feed) Start() {
 				ev := consumer.Poll(100)
 				switch e := ev.(type) {
 				case *kafka.Message:
-					log.Printf("Message on %s: %s\n", e.TopicPartition, string(e.Value))
+					// log.Printf("Message on %s: %s\n", e.TopicPartition, string(e.Value))
 					var msg map[string]interface{}
 					err := json.Unmarshal(e.Value, &msg)
 					if err != nil {
@@ -348,7 +347,7 @@ func (f *Feed) Start() {
 				case kafka.PartitionEOF:
 					log.Printf("%% Reached %v\n", e)
 				case kafka.Error:
-					log.Fprintf(os.Stderr, "Error: %v\n", e)
+					fmt.Fprintf(os.Stderr, "Error: %v\n", e)
 					run = false
 				}
 			}
@@ -492,7 +491,7 @@ func (f *Feed) setMatch(msg map[string]interface{}) {
 
 		// Home team
 		if homeID, ok := msg["homeid"]; ok {
-			teamID := strconv.FormatFloat(homeID.(float64), 'f', -1, 64)
+			teamID := fmt.Sprintf("%v", homeID)
 			team := make(map[string]interface{})
 			team["id"] = teamID
 
@@ -525,7 +524,7 @@ func (f *Feed) setMatch(msg map[string]interface{}) {
 
 		// Away team
 		if awayID, ok := msg["awayid"]; ok {
-			teamID := strconv.FormatFloat(awayID.(float64), 'f', -1, 64)
+			teamID := fmt.Sprintf("%v", awayID)
 			team := make(map[string]interface{})
 			team["id"] = teamID
 
@@ -560,15 +559,35 @@ func (f *Feed) setMatch(msg map[string]interface{}) {
 			if o, ok := msg[k]; ok {
 				switch k {
 				case "eventstatus":
-					value[v] = string(f.getStatus(o.(string), msg["marketid"], msg["l"]))
+					value[v] = string(f.getStatus(fmt.Sprintf("%v", o), msg["marketid"], msg["l"]))
 				case "isht":
-					if ht, ok := msg["isht"]; ok && ht.(bool) {
+					isht := false
+					if ht, ok := msg["isht"]; ok {
+						switch vv := ht.(type) {
+						case float64:
+							isht = vv > 0
+						case bool:
+							isht = vv
+						}
+					}
+
+					if isht {
 						// HT
 						value[v] = 3
 					}
 				case "liveperiod":
 					// Ignore liveperiod when HT
-					if ht, ok := msg["isht"]; !ok || !ht.(bool) {
+					isht := false
+					if ht, ok := msg["isht"]; ok {
+						switch vv := ht.(type) {
+						case float64:
+							isht = vv > 0
+						case bool:
+							isht = vv
+						}
+					}
+
+					if !isht {
 						value[v] = o
 					}
 				default:
@@ -612,7 +631,15 @@ func (f *Feed) setOdds(msg map[string]interface{}) {
 			switch k {
 			case "bettype":
 				if bettype, ok := msg[k]; ok {
-					if bt, ok := betTypes[int(bettype.(float64))]; ok {
+					var v int
+					switch ev := bettype.(type) {
+					case string:
+						v, _ = strconv.Atoi(ev)
+					case float64:
+						v = int(ev)
+					}
+
+					if bt, ok := betTypes[v]; ok {
 						value["betTypeId"] = bt.ID
 						value["betTypeName"] = bt.Name
 						value["__typename"] = bt.TypeName
@@ -620,7 +647,7 @@ func (f *Feed) setOdds(msg map[string]interface{}) {
 				}
 			case "oddsstatus":
 				if oddsstatus, ok := msg["oddsstatus"]; ok {
-					if status, ok := allStatus[oddsstatus.(string)]; ok {
+					if status, ok := allStatus[fmt.Sprintf("%v", oddsstatus)]; ok {
 						value[v] = string(status)
 					}
 				}
@@ -710,16 +737,16 @@ func (f *Feed) setOdds(msg map[string]interface{}) {
 			}
 
 			// Public to match channel
-			h := f.rdb.HMGet(f.ctx, key, "__typename", "matchId", "leagueId")
-			if h.Err() == nil {
+			if h := f.rdb.HMGet(f.ctx, key, "__typename", "matchId", "leagueId", "betTypeId"); h.Err() == nil {
 				val := h.Val()
-				typeName := val[0].(string)
+				if val[0] != nil {
+					value["__typename"] = val[0]
+					value["matchId"] = val[1]
+					value["leagueId"] = val[2]
+					value["betTypeId"] = val[3]
 
-				value["__typename"] = val[0]
-				value["matchId"] = val[1]
-				value["leagueId"] = val[2]
-
-				f.send(typeName, value)
+					f.send(val[0].(string), value)
+				}
 			}
 		}
 	}
@@ -732,7 +759,7 @@ func (f *Feed) closeMatch(msg map[string]interface{}) {
 
 		if h := f.rdb.HMGet(f.ctx, key, "__typename", "id", "leagueId"); h.Err() == nil {
 			val := h.Val()
-			if val[1] != nil {
+			if val[0] != nil && val[1] != nil {
 				value := map[string]interface{}{
 					"status": string(model.StatusComplete),
 				}
@@ -767,7 +794,7 @@ func (f *Feed) closeOdds(msg map[string]interface{}) {
 
 		if h := f.rdb.HMGet(f.ctx, key, "__typename", "id", "matchId", "leagueId", "betTypeId"); h.Err() == nil {
 			val := h.Val()
-			if val[1] != nil {
+			if val[0] != nil && val[1] != nil {
 				value := map[string]interface{}{
 					"status": string(model.StatusComplete),
 				}
@@ -784,6 +811,7 @@ func (f *Feed) closeOdds(msg map[string]interface{}) {
 				value["id"] = val[1]
 				value["matchId"] = val[2]
 				value["leagueId"] = val[3]
+				value["betTypeId"] = val[4]
 
 				f.send(val[0].(string), value)
 			}

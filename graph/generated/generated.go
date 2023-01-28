@@ -191,7 +191,7 @@ type ComplexityRoot struct {
 	}
 
 	Subscription struct {
-		Subscribe func(childComplexity int, channels []string) int
+		Subscribe func(childComplexity int, condition []string) int
 	}
 
 	Team struct {
@@ -209,7 +209,7 @@ type QueryResolver interface {
 	Matches(ctx context.Context, date string) ([]model.MatchResult, error)
 }
 type SubscriptionResolver interface {
-	Subscribe(ctx context.Context, channels []string) (<-chan map[string]interface{}, error)
+	Subscribe(ctx context.Context, condition []string) (<-chan map[string]interface{}, error)
 }
 
 type executableSchema struct {
@@ -1076,7 +1076,7 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 			return 0, false
 		}
 
-		return e.complexity.Subscription.Subscribe(childComplexity, args["channels"].([]string)), true
+		return e.complexity.Subscription.Subscribe(childComplexity, args["condition"].([]string)), true
 
 	case "Team.id":
 		if e.complexity.Team.ID == nil {
@@ -1357,10 +1357,11 @@ type Mutation {
 }
 
 type Subscription {
-    subscribe(channels: [ID!]!): Map!
+  subscribe(condition: [String!]!): Map!
 }
 
-union MatchResult = League | Match | Hdpou | MO | CS | OE`, BuiltIn: false},
+union MatchResult = League | Match | Hdpou | MO | CS | OE
+`, BuiltIn: false},
 }
 var parsedSchema = gqlparser.MustLoadSchema(sources...)
 
@@ -1465,14 +1466,14 @@ func (ec *executionContext) field_Subscription_subscribe_args(ctx context.Contex
 	var err error
 	args := map[string]interface{}{}
 	var arg0 []string
-	if tmp, ok := rawArgs["channels"]; ok {
-		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("channels"))
-		arg0, err = ec.unmarshalNID2ᚕstringᚄ(ctx, tmp)
+	if tmp, ok := rawArgs["condition"]; ok {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("condition"))
+		arg0, err = ec.unmarshalNString2ᚕstringᚄ(ctx, tmp)
 		if err != nil {
 			return nil, err
 		}
 	}
-	args["channels"] = arg0
+	args["condition"] = arg0
 	return args, nil
 }
 
@@ -5577,7 +5578,7 @@ func (ec *executionContext) _Subscription_subscribe(ctx context.Context, field g
 	fc.Args = args
 	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (interface{}, error) {
 		ctx = rctx // use context from middleware stack in children
-		return ec.resolvers.Subscription().Subscribe(rctx, args["channels"].([]string))
+		return ec.resolvers.Subscription().Subscribe(rctx, args["condition"].([]string))
 	})
 	if err != nil {
 		ec.Error(ctx, err)
@@ -7856,36 +7857,6 @@ func (ec *executionContext) marshalNID2string(ctx context.Context, sel ast.Selec
 	return res
 }
 
-func (ec *executionContext) unmarshalNID2ᚕstringᚄ(ctx context.Context, v interface{}) ([]string, error) {
-	var vSlice []interface{}
-	if v != nil {
-		if tmp1, ok := v.([]interface{}); ok {
-			vSlice = tmp1
-		} else {
-			vSlice = []interface{}{v}
-		}
-	}
-	var err error
-	res := make([]string, len(vSlice))
-	for i := range vSlice {
-		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
-		res[i], err = ec.unmarshalNID2string(ctx, vSlice[i])
-		if err != nil {
-			return nil, err
-		}
-	}
-	return res, nil
-}
-
-func (ec *executionContext) marshalNID2ᚕstringᚄ(ctx context.Context, sel ast.SelectionSet, v []string) graphql.Marshaler {
-	ret := make(graphql.Array, len(v))
-	for i := range v {
-		ret[i] = ec.marshalNID2string(ctx, sel, v[i])
-	}
-
-	return ret
-}
-
 func (ec *executionContext) unmarshalNInt2int(ctx context.Context, v interface{}) (int, error) {
 	res, err := graphql.UnmarshalInt(v)
 	return res, graphql.ErrorOnPath(ctx, err)
@@ -8133,6 +8104,36 @@ func (ec *executionContext) marshalNString2string(ctx context.Context, sel ast.S
 		}
 	}
 	return res
+}
+
+func (ec *executionContext) unmarshalNString2ᚕstringᚄ(ctx context.Context, v interface{}) ([]string, error) {
+	var vSlice []interface{}
+	if v != nil {
+		if tmp1, ok := v.([]interface{}); ok {
+			vSlice = tmp1
+		} else {
+			vSlice = []interface{}{v}
+		}
+	}
+	var err error
+	res := make([]string, len(vSlice))
+	for i := range vSlice {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
+		res[i], err = ec.unmarshalNString2string(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func (ec *executionContext) marshalNString2ᚕstringᚄ(ctx context.Context, sel ast.SelectionSet, v []string) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	for i := range v {
+		ret[i] = ec.marshalNString2string(ctx, sel, v[i])
+	}
+
+	return ret
 }
 
 func (ec *executionContext) marshalN__Directive2githubᚗcomᚋ99designsᚋgqlgenᚋgraphqlᚋintrospectionᚐDirective(ctx context.Context, sel ast.SelectionSet, v introspection.Directive) graphql.Marshaler {
