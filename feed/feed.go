@@ -700,16 +700,18 @@ func (f *Feed) setOdds(msg map[string]interface{}) {
 		if val, ok := msg["matchid"]; ok {
 			matchID := strconv.FormatFloat(val.(float64), 'f', -1, 64)
 
-			f.rdb.ZAdd(f.ctx, fmt.Sprintf("match:%v:odds", matchID), &redis.Z{
-				Score:  msg["sort"].(float64),
-				Member: id,
-			})
-
-			if typeID, ok := value["betTypeId"]; ok {
-				f.rdb.ZAdd(f.ctx, fmt.Sprintf("match:%v:%v", matchID, typeID), &redis.Z{
+			if _, ok := msg["sort"]; ok {
+				f.rdb.ZAdd(f.ctx, fmt.Sprintf("match:%v:odds", matchID), &redis.Z{
 					Score:  msg["sort"].(float64),
 					Member: id,
 				})
+
+				if typeID, ok := value["betTypeId"]; ok {
+					f.rdb.ZAdd(f.ctx, fmt.Sprintf("match:%v:%v", matchID, typeID), &redis.Z{
+						Score:  msg["sort"].(float64),
+						Member: id,
+					})
+				}
 			}
 
 			// if cmd := f.rdb.ZAdd(f.ctx, fmt.Sprintf("match:%v:odds", matchID), &redis.Z{
