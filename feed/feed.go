@@ -425,6 +425,10 @@ func (f *Feed) send(typeName string, msg interface{}) {
 }
 
 func (f *Feed) setLeague(msg map[string]interface{}) {
+	if _, ok := msg["leagueid"]; !ok {
+		return
+	}
+
 	id := strconv.FormatFloat(msg["leagueid"].(float64), 'f', -1, 64)
 	key := fmt.Sprintf("league:%s", id)
 	value := make(map[string]interface{})
@@ -698,7 +702,13 @@ func (f *Feed) setOdds(msg map[string]interface{}) {
 		}
 
 		if val, ok := msg["matchid"]; ok {
-			matchID := strconv.FormatFloat(val.(float64), 'f', -1, 64)
+			var matchID string
+			switch val.(type) {
+			case string:
+				matchID = val.(string)
+			case float64:
+				matchID = strconv.FormatFloat(val.(float64), 'f', -1, 64)
+			}
 
 			if _, ok := msg["sort"]; ok {
 				f.rdb.ZAdd(f.ctx, fmt.Sprintf("match:%v:odds", matchID), &redis.Z{
